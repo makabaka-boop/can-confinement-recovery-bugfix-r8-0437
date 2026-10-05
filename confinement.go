@@ -24,6 +24,8 @@ func (c *ConfinementState) failed() {
 	}
 	c.TEC += 8
 	if c.TEC >= 256 {
+		// Saturation: the transmit error counter pins at 256 and the node
+		// enters bus-off. Recovery can only start from an explicit request.
 		c.TEC = 256
 		c.BusOff = true
 		c.RecoveryEnabled = false
@@ -40,24 +42,30 @@ func (c *ConfinementState) requestRecovery() {
 	if !c.BusOff || c.RecoveryEnabled {
 		return
 	}
+	// Observation starts only at this explicit request: bits seen before it,
+	// including idle bits while bus-off, never count.
 	c.RecoveryEnabled = true
 	c.Groups = 0
 	c.RecessiveRun = 0
 }
 func (c *ConfinementState) observe(wire BitLevel, at int) {
-	if !c.BusOff {
+	if !c.BusOff || !c.RecoveryEnabled {
 		return
 	}
 	if wire == Dominant {
+		// A dominant bit interrupts only the current, not-yet-complete group;
+		// already completed 11-bit groups are retained.
 		c.RecessiveRun = 0
-		c.Groups = 0
 		return
 	}
 	c.RecessiveRun++
-	if c.RecessiveRun == 11 {
-		c.Groups++
-		c.RecessiveRun = 0
+	if c.RecessiveRun < 11 {
+		return
 	}
+	// Exactly eleven recessive bits close one non-overlapping group; counting
+	// the next group starts with the following wire bit.
+	c.Groups++
+	c.RecessiveRun = 0
 	if c.Groups >= 128 {
 		c.BusOff = false
 		c.TEC = 0

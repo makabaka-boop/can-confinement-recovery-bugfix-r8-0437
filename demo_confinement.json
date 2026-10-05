@@ -1,0 +1,21 @@
+{
+  "Nodes": [
+    {
+      "Name": "A",
+      "TEC": 248,
+      "RecoverAt": 30,
+      "Frames": [
+        {"ID": 1110, "Data": [170], "Enqueue": 0}
+      ]
+    },
+    {
+      "Name": "RX",
+      "TEC": 0,
+      "Frames": []
+    }
+  ],
+  "Faults": [
+    {"ReceiverNode": "A", "AtWireBit": 20, "Level": 0}
+  ],
+  "Limit": 2000
+}

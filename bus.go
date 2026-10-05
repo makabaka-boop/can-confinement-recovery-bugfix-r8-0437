@@ -139,6 +139,12 @@ type Bus struct {
 	starters  []string
 	joinedErr bool
 
+	// participants are the controllers taking part in the current frame: the
+	// active senders plus every node that was not bus-off when the frame began.
+	// A node that recovers in the middle of someone else's frame does not join
+	// that frame; it waits for bus idle like a real powered-on controller.
+	participants []*Node
+
 	pendingFlagAt  int
 	pendingReason  string
 	pendingFrame   Frame
@@ -207,7 +213,19 @@ func (b *Bus) Run() (*Result, error) {
 
 func (b *Bus) done() bool {
 	for _, n := range b.nodes {
+		if n.Confinement != nil && n.Confinement.RecoverAt != nil && *n.Confinement.RecoverAt >= b.t {
+			// An explicit recovery request is still pending: the wire bits up to
+			// that time must be emitted (they do not count, but they are part of
+			// the observable trace).
+			return false
+		}
 		if n.blocked() {
+			// A bus-off node with no pending frames still has to observe the
+			// wire while a recovery is in progress; stopping early would deny
+			// it the 128 recessive groups present on the real line.
+			if n.Confinement != nil && n.Confinement.RecoveryEnabled {
+				return false
+			}
 			continue
 		}
 		if n.tx != nil || len(n.queue) > 0 {
@@ -241,6 +259,13 @@ func (b *Bus) startReadyFrames() bool {
 	if !ready {
 		return false
 	}
+	b.participants = b.participants[:0]
+	for _, n := range b.nodes {
+		if n.blocked() {
+			continue
+		}
+		b.participants = append(b.participants, n)
+	}
 	for _, n := range b.nodes {
 		n.recv.reset()
 	}
@@ -260,10 +285,11 @@ func (b *Bus) activeNodes() []*Node {
 
 // receivingNodes are controllers that may ACK or signal receiver errors at this
 // frame. This includes controllers that lost arbitration, switched to receive,
-// and kept their frame queued for automatic retransmission.
+// and kept their frame queued for automatic retransmission. Controllers that
+// were bus-off when the frame started never participate.
 func (b *Bus) receivingNodes() []*Node {
 	var out []*Node
-	for _, n := range b.nodes {
+	for _, n := range b.participants {
 		if n.tx == nil || !n.tx.active {
 			out = append(out, n)
 		}
@@ -346,7 +372,7 @@ func (b *Bus) stepFrame() error {
 	}
 	b.emit(wire, kind, mapTraceDrivers(drivers), faultSamples, mismatch)
 
-	for _, n := range b.nodes {
+	for _, n := range b.participants {
 		n.recv.feed(samples[n.Name], kind)
 	}
 
@@ -409,9 +435,8 @@ func (b *Bus) stepFrame() error {
 }
 
 func (b *Bus) loseArbitration(n *Node) {
-	if n.Confinement != nil {
-		n.Confinement.failed()
-	}
+	// Losing arbitration is not a transmission failure: the TEC is untouched.
+	// The retained job is retried automatically from idle.
 	n.tx.active = false
 	n.tx.lost = true
 	bit := n.tx.encoded.Bits[n.tx.bit]
@@ -463,8 +488,11 @@ func (b *Bus) failActiveJobs(_ string) {
 		if n.Confinement != nil {
 			n.Confinement.failed()
 			if n.blocked() {
-				n.queue = n.queue[1:]
-				n.tx = nil
+				// Bus-off: the node may not send, receive or ACK. The frame it
+				// was transmitting stays at the queue head and is continued only
+				// after an explicit recovery completes.
+				job.lost = false
+				job.bit = 0
 				continue
 			}
 		}
@@ -514,16 +542,20 @@ func (b *Bus) beginErrorFlag(at int, reason string, frame Frame, detectedAt int,
 
 func (b *Bus) stepErrorFlag() {
 	drivers := map[string]BitLevel{}
+	contributors := b.starters
 	if b.joinedErr {
-		for _, n := range b.nodes {
-			drivers[n.Name] = Dominant
+		contributors = nil
+		for _, n := range b.participants {
+			contributors = append(contributors, n.Name)
 		}
-	} else {
-		for _, name := range b.starters {
+	}
+	for _, name := range contributors {
+		// A bus-off node must not drive the wire, including the error flag.
+		if n := b.byName[name]; n != nil && !n.blocked() {
 			drivers[name] = Dominant
 		}
 	}
-	b.emit(Dominant, KindErrorFlag, mapTraceDrivers(drivers), nil, false)
+	b.emit(wiredAND(drivers), KindErrorFlag, mapTraceDrivers(drivers), nil, false)
 	b.joinedErr = true
 	b.phaseLeft--
 	if b.phaseLeft == 0 {
@@ -552,7 +584,7 @@ func (b *Bus) finishGoodFrame(active []*Node) {
 	for _, n := range active {
 		senders[n.Name] = true
 	}
-	for _, n := range b.nodes {
+	for _, n := range b.participants {
 		// A controller that lost arbitration continues receiving. A controller
 		// that was an active sender does not receive its own frame.
 		if senders[n.Name] {

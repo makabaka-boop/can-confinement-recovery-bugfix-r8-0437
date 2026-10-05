@@ -7,8 +7,9 @@ bit; dominant (`0`) wins over recessive (`1`).
 ## Run
 
 ```sh
-go test ./...     # 11 tests, including an independent CRC/encoding reference
+go test ./...     # 19 tests, including an independent CRC/encoding reference
 go run .          # print the demo bus trace and result records
+go run . --confinement scenario.json   # TEC/bus-off teaching mode (see below)
 ```
 
 ## What is modeled
@@ -61,8 +62,12 @@ counters / error-passive / bus-off.
 - `frame.go` — frame encoding, CRC-15, stuffing.
 - `receiver.go` — streaming destuffing decoder and fixed-field checks.
 - `bus.go` — wired-AND bus, arbitration, ACK, error frames, retries.
+- `confinement.go` — teaching-mode TEC, bus-off and 128×11 recovery observer.
 - `main.go` — demo.
+- `scenario.go` — `--confinement scenario.json` loader.
 - `bus_test.go` — independent CRC/encoding reference plus scenario tests.
+- `confinement_test.go` — TEC/bus-off/recovery tests with independent wire-trace replay.
+- `demo_confinement.json` — example confinement scenario.
 
 
 新增 --confinement scenario.json 教学模式，Scenario 含 Nodes（Name、TEC、可选 RecoverAt、Frames 的 ID/Data/Enqueue）、Faults 与 Limit（1～20000 位）。只加入发送 TEC 与 bus-off：真实失败尝试 +8，成功 -1，仲裁退出不计错误；TEC 到 256 后节点不得发送、接收或 ACK，待发送队列保留。显式恢复请求仅在 bus-off 时启动观察，收到 128 个互不重叠的连续 11 隐性位组后恢复，显性位只打断当前未完成组，已完成组保留。计数来自实际线路含空闲位，恢复后原队列继续；期限结束可返回仍阻塞的状态与未发队列。不宣称完整 ISO 错误主动/被动模型。默认模式保留原行为。
