@@ -184,7 +184,7 @@ func (b *Bus) Run() (*Result, error) {
 		}
 		switch b.phase {
 		case phaseIdle:
-			if b.done() {
+			if b.done() && !b.waitingOnBlocked() {
 				return b.result(), nil
 			}
 			if !b.startReadyFrames() {
@@ -215,6 +215,23 @@ func (b *Bus) done() bool {
 		}
 	}
 	return true
+}
+
+// waitingOnBlocked reports whether the only remaining work belongs to bus-off
+// nodes. In a bounded confinement run the bus keeps emitting real (idle) bits
+// up to the deadline, since those bits are the recovery observation medium.
+// Without a configured deadline (default mode) the run ends as soon as every
+// healthy node is idle.
+func (b *Bus) waitingOnBlocked() bool {
+	if b.bitLimit <= 0 {
+		return false
+	}
+	for _, n := range b.nodes {
+		if n.blocked() {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *Bus) startReadyFrames() bool {
@@ -260,10 +277,14 @@ func (b *Bus) activeNodes() []*Node {
 
 // receivingNodes are controllers that may ACK or signal receiver errors at this
 // frame. This includes controllers that lost arbitration, switched to receive,
-// and kept their frame queued for automatic retransmission.
+// and kept their frame queued for automatic retransmission. A bus-off
+// controller is fully isolated and is never among them.
 func (b *Bus) receivingNodes() []*Node {
 	var out []*Node
 	for _, n := range b.nodes {
+		if n.blocked() {
+			continue
+		}
 		if n.tx == nil || !n.tx.active {
 			out = append(out, n)
 		}
@@ -347,6 +368,9 @@ func (b *Bus) stepFrame() error {
 	b.emit(wire, kind, mapTraceDrivers(drivers), faultSamples, mismatch)
 
 	for _, n := range b.nodes {
+		if n.blocked() {
+			continue
+		}
 		n.recv.feed(samples[n.Name], kind)
 	}
 
@@ -409,9 +433,9 @@ func (b *Bus) stepFrame() error {
 }
 
 func (b *Bus) loseArbitration(n *Node) {
-	if n.Confinement != nil {
-		n.Confinement.failed()
-	}
+	// Losing arbitration is not a transmission failure: TEC is untouched. The
+	// node stops driving, keeps receiving, and its job stays queued for
+	// automatic retransmission.
 	n.tx.active = false
 	n.tx.lost = true
 	bit := n.tx.encoded.Bits[n.tx.bit]
@@ -463,7 +487,9 @@ func (b *Bus) failActiveJobs(_ string) {
 		if n.Confinement != nil {
 			n.Confinement.failed()
 			if n.blocked() {
-				n.queue = n.queue[1:]
+				// Bus-off stops the node but neither discards the unsent frame nor
+				// produces a transmit result: the job is detached while the frame
+				// stays at the queue head for execution after an explicit recovery.
 				n.tx = nil
 				continue
 			}
@@ -516,14 +542,22 @@ func (b *Bus) stepErrorFlag() {
 	drivers := map[string]BitLevel{}
 	if b.joinedErr {
 		for _, n := range b.nodes {
+			if n.blocked() {
+				continue
+			}
 			drivers[n.Name] = Dominant
 		}
 	} else {
 		for _, name := range b.starters {
-			drivers[name] = Dominant
+			if n := b.byName[name]; n != nil && !n.blocked() {
+				drivers[name] = Dominant
+			}
 		}
 	}
-	b.emit(Dominant, KindErrorFlag, mapTraceDrivers(drivers), nil, false)
+	// The wire follows wired-AND from the actual drivers. A node that became
+	// bus-off when the flag began contributes nothing, so an isolated node can
+	// leave these bits recessive even though they are still error-flag bits.
+	b.emit(wiredAND(drivers), KindErrorFlag, mapTraceDrivers(drivers), nil, false)
 	b.joinedErr = true
 	b.phaseLeft--
 	if b.phaseLeft == 0 {
@@ -535,6 +569,9 @@ func (b *Bus) stepErrorFlag() {
 func (b *Bus) stepFixedRecessive(next busPhase, nextLeft int, kind BitKind) {
 	drivers := map[string]BitLevel{}
 	for _, n := range b.nodes {
+		if n.blocked() {
+			continue
+		}
 		drivers[n.Name] = Recessive
 	}
 	b.emit(Recessive, kind, mapTraceDrivers(drivers), nil, false)

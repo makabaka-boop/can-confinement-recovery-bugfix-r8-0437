@@ -44,13 +44,18 @@ func (c *ConfinementState) requestRecovery() {
 	c.Groups = 0
 	c.RecessiveRun = 0
 }
+
+// observe consumes one bit of the *actual* wired-AND level. Counting runs only
+// after an explicit recovery request while the node is bus-off. The 128
+// required occurrences are 11 consecutive recessive bits counted as
+// non-overlapping groups: a dominant bit merely interrupts the group currently
+// being assembled; groups already completed are retained.
 func (c *ConfinementState) observe(wire BitLevel, at int) {
-	if !c.BusOff {
+	if !c.BusOff || !c.RecoveryEnabled {
 		return
 	}
 	if wire == Dominant {
 		c.RecessiveRun = 0
-		c.Groups = 0
 		return
 	}
 	c.RecessiveRun++

@@ -7,7 +7,7 @@ bit; dominant (`0`) wins over recessive (`1`).
 ## Run
 
 ```sh
-go test ./...     # 11 tests, including an independent CRC/encoding reference
+go test ./...     # 18 tests, including an independent CRC/encoding reference
 go run .          # print the demo bus trace and result records
 ```
 
